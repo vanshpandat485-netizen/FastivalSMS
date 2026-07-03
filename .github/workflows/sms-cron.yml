@@ -25,7 +25,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install
         run: npm install
@@ -47,4 +47,4 @@ jobs:
         with:
           name: sms-logs-${{ github.run_id }}
           path: logs/
-          retention-days: 14
+          if-no-files-found: ignore
