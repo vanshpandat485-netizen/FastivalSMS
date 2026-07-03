@@ -1,0 +1,50 @@
+name: FestiveSMS Daily Sender
+
+on:
+  schedule:
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+    inputs:
+      date_override:
+        description: 'Date YYYY-MM-DD (empty = today)'
+        required: false
+        default: ''
+      dry_run:
+        description: 'true = no SMS sent, just test'
+        required: false
+        default: 'false'
+
+jobs:
+  send-sms:
+    name: Queue and Send SMS
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install
+        run: npm install
+
+      - name: Run SMS Sender
+        env:
+          SUPABASE_URL:   ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:   ${{ secrets.SUPABASE_KEY }}
+          FAST2SMS_KEY:   ${{ secrets.FAST2SMS_KEY }}
+          WEBHOOK_URL:    ${{ secrets.WEBHOOK_URL }}
+          DATE_OVERRIDE:  ${{ inputs.date_override }}
+          DRY_RUN:        ${{ inputs.dry_run }}
+          SMS_PER_SECOND: '10'
+        run: node send-sms.js
+
+      - name: Upload Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sms-logs-${{ github.run_id }}
+          path: logs/
+          retention-days: 14
