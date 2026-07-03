@@ -1,0 +1,17 @@
+{
+  "name": "festivesms-automation",
+  "version": "3.0.0",
+  "description": "FestiveSMS SMS Automation",
+  "type": "module",
+  "main": "send-sms.js",
+  "scripts": {
+    "start": "node send-sms.js",
+    "dry": "DRY_RUN=true node send-sms.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.4"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
