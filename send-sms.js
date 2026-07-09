@@ -58,10 +58,11 @@ var db = createClient(SUPABASE_URL, SUPABASE_KEY, {
   auth: { autoRefreshToken: false, persistSession: false }
 });
 
-function buildMsg(customer, occasion, shop, addr) {
+function buildMsg(customer, occasion, shop, addr, phone) {
   return 'Dear ' + customer + ', ' + occasion + ' ki hardik shubhkamnayein '
     + shop + ' ki taraf se. Please visit our shop at '
-    + (addr || 'our shop') + ' for gifts and heavy discounts. ' + shop;
+    + (addr || 'our shop') + ' for gifts and heavy discounts. ' + shop
+    + (phone ? ', Contact: ' + phone : '');
 }
 
 async function dbFetchAll(table, select, filters) {
