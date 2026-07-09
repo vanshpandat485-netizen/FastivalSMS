@@ -3,6 +3,8 @@ name: FestiveSMS Daily Sender
 on:
   schedule:
     - cron: '30 2 * * *'
+    - cron: '0 3 * * *'
+    - cron: '30 3 * * *'
   workflow_dispatch:
     inputs:
       date_override:
