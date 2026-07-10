@@ -51,6 +51,12 @@ function checkEnv() {
   log('INFO', '='.repeat(50));
   log('INFO', 'Date : ' + TODAY);
   log('INFO', 'Mode : ' + MODE + (DRY_RUN ? ' [DRY]' : ''));
+  if (MODE === 'WEBHOOK') {
+    log('INFO', 'TESTING — webhook.site');
+  } else {
+    log('INFO', 'PRODUCTION — Fast2SMS');
+    log('INFO', 'Rate : ' + SMS_PER_SEC + '/sec');
+  }
   log('INFO', '='.repeat(50));
 }
 
@@ -58,6 +64,7 @@ var db = createClient(SUPABASE_URL, SUPABASE_KEY, {
   auth: { autoRefreshToken: false, persistSession: false }
 });
 
+// ★ UPDATED — Contact number at end
 function buildMsg(customer, occasion, shop, addr, phone) {
   return 'Dear ' + customer + ', ' + occasion + ' ki hardik shubhkamnayein '
     + shop + ' ki taraf se. Please visit our shop at '
@@ -91,86 +98,55 @@ async function dbUpdate(ids, status) {
   }
 }
 
-// ════════════════════════════════════════════════════════
-// SMART EARLY EXIT
-//
-// PEHLE check karo:
-//   1. Aaj koi festival hai?
-//   2. Koi pending SMS pehle se queue mein hai?
-//
-// Agar DONO nahi:
-//   Sirf birthday count karo (FAST query)
-//   Agar 0 birthday bhi hai → EXIT in 3 seconds
-//   50K customer scan SKIP ho jayega
-//
-// TIME SAVED:
-//   Without: 5 min daily × 30 = 150 min/month
-//   With:    3 sec daily × 30 = 1.5 min/month
-//   SAVING:  148.5 min/month! 🎉
-// ════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════
+// SMART CHECK
+// ════════════════════════════════════════════════
 async function smartCheck() {
   log('INFO', '');
   log('INFO', '-- SMART CHECK --');
 
-  // Check 1: Festivals today?
   var festRes = await db.from('festivals').select('id, name').eq('date', TODAY);
   var todayFests = festRes.data || [];
-  var hasFestivals = todayFests.length > 0;
-  log('INFO', 'Festivals today: ' + todayFests.length,
+  log('INFO', 'Festivals: ' + todayFests.length,
     todayFests.length > 0 ? { names: todayFests.map(function(f) { return f.name; }) } : undefined);
 
-  // Check 2: Already pending SMS in queue?
   var pendRes = await db.from('sms_queue')
     .select('id', { count: 'exact', head: true })
     .eq('scheduled_date', TODAY)
     .eq('status', 'pending');
   var pendingCount = pendRes.count || 0;
-  var hasPending = pendingCount > 0;
-  log('INFO', 'Pending in queue: ' + pendingCount);
+  log('INFO', 'Pending: ' + pendingCount);
 
-  // Check 3: Any birthdays today? (FAST query — no full scan)
-  // Get today's month and day
   var todayDate = new Date(TODAY + 'T00:00:00');
-  var tMonth = todayDate.getMonth() + 1; // 1-12
-  var tDay = todayDate.getDate();        // 1-31
-  // Build date pattern for birthday check
-  var monthStr = String(tMonth).padStart(2, '0');
-  var dayStr = String(tDay).padStart(2, '0');
+  var monthStr = String(todayDate.getMonth() + 1).padStart(2, '0');
+  var dayStr = String(todayDate.getDate()).padStart(2, '0');
   var dobPattern = '%' + '-' + monthStr + '-' + dayStr;
 
-  // Use ilike to match DOB ending with -MM-DD
   var bdayRes = await db.from('customers')
     .select('id', { count: 'exact', head: true })
     .like('dob', dobPattern);
   var birthdayCount = bdayRes.count || 0;
-  var hasBirthdays = birthdayCount > 0;
-  log('INFO', 'Birthdays today: ' + birthdayCount);
+  log('INFO', 'Birthdays: ' + birthdayCount);
 
-  // DECISION
-  if (!hasFestivals && !hasPending && !hasBirthdays) {
-    log('INFO', '');
-    log('INFO', '╔══════════════════════════════════════╗');
-    log('INFO', '║  NOTHING TO DO TODAY                 ║');
-    log('INFO', '║  No festivals, no birthdays,         ║');
-    log('INFO', '║  no pending SMS                      ║');
-    log('INFO', '║  EXIT in 3 seconds! ⚡               ║');
-    log('INFO', '╚══════════════════════════════════════╝');
+  if (todayFests.length === 0 && pendingCount === 0 && birthdayCount === 0) {
+    log('INFO', 'NOTHING TO DO — EXIT');
     return { shouldContinue: false, todayFests: [] };
   }
 
-  log('INFO', 'Work found! Continuing...');
+  log('INFO', 'Work found!');
   return { shouldContinue: true, todayFests: todayFests };
 }
 
-// ════════════════════════════════════════════════════════
-// QUEUE — Only runs when needed
-// ════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════
+// QUEUE — ★ phone_number added to query & buildMsg
+// ════════════════════════════════════════════════
 async function stepQueue(todayFests) {
   log('INFO', '');
-  log('INFO', '-- STEP 1: Queue SMS --');
+  log('INFO', '-- STEP 1: Queue --');
 
+  // ★ phone_number added here
   var userRes = await db.from('users')
-    .select('id, shop_name, shop_address, plan_end_date')
+    .select('id, shop_name, shop_address, plan_end_date, phone_number')
     .eq('is_admin', false)
     .eq('subscription_active', true)
     .gte('plan_end_date', TODAY);
@@ -197,7 +173,6 @@ async function stepQueue(todayFests) {
 
       var rows = [];
 
-      // Birthdays
       custs.forEach(function(c) {
         if (!c.dob) return;
         var d = new Date(c.dob + 'T00:00:00');
@@ -205,20 +180,21 @@ async function stepQueue(todayFests) {
           if (!has[c.id + '_birthday']) {
             rows.push({
               user_id: shop.id, customer_id: c.id, festival_id: null, sms_type: 'birthday',
-              message: buildMsg(c.customer_name, 'Janmdin', shop.shop_name, shop.shop_address),
+              // ★ phone_number passed here
+              message: buildMsg(c.customer_name, 'Janmdin', shop.shop_name, shop.shop_address, shop.phone_number),
               status: 'pending', scheduled_date: TODAY
             });
           }
         }
       });
 
-      // Festivals
       todayFests.forEach(function(f) {
         custs.forEach(function(c) {
           if (!has[c.id + '_f_' + f.id]) {
             rows.push({
               user_id: shop.id, customer_id: c.id, festival_id: f.id, sms_type: 'festival',
-              message: buildMsg(c.customer_name, f.name, shop.shop_name, shop.shop_address),
+              // ★ phone_number passed here
+              message: buildMsg(c.customer_name, f.name, shop.shop_name, shop.shop_address, shop.phone_number),
               status: 'pending', scheduled_date: TODAY
             });
           }
@@ -238,15 +214,15 @@ async function stepQueue(todayFests) {
   }
 
   ST.queued = totalQ;
-  log('INFO', 'Queue done: ' + totalQ + ' SMS');
+  log('INFO', 'Queue done: ' + totalQ);
 }
 
-// ════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════
 // SEND
-// ════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════
 async function stepSend() {
   log('INFO', '');
-  log('INFO', '-- STEP 2: Send SMS --');
+  log('INFO', '-- STEP 2: Send --');
 
   var pending = await dbFetchAll('sms_queue',
     'id, message, sms_type, customers(customer_name, phone_number), users!sms_queue_user_id_fkey(shop_name, subscription_active, plan_end_date)',
@@ -276,7 +252,6 @@ async function stepSend() {
   }
 }
 
-// WEBHOOK MODE — FAST
 async function sendWebhookMode(records) {
   log('INFO', 'WEBHOOK MODE — ' + SEND_PARALLEL + ' parallel');
   for (var i = 0; i < records.length; i += SEND_PARALLEL) {
@@ -288,9 +263,13 @@ async function sendWebhookMode(records) {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            phone: r.phone, message: r.message,
-            shop: r.shop, type: r.smsType,
-            date: TODAY, ts: new Date().toISOString(), mode: 'TESTING'
+            phone: r.phone,
+            message: r.message,
+            shop: r.shop,
+            type: r.smsType,
+            date: TODAY,
+            ts: new Date().toISOString(),
+            mode: 'TESTING'
           }),
           signal: AbortSignal.timeout(10000)
         }).then(function(resp) {
@@ -314,13 +293,12 @@ async function sendWebhookMode(records) {
     if ((i + SEND_PARALLEL) % 100 < SEND_PARALLEL || i + SEND_PARALLEL >= records.length) {
       var done = Math.min(i + SEND_PARALLEL, records.length);
       var sec = Math.round((Date.now() - ST.t0) / 1000);
-      log('INFO', done + '/' + records.length + ' | ' + sec + 's | sent:' + ST.sent + ' fail:' + ST.failed);
+      log('INFO', done + '/' + records.length + ' | ' + sec + 's | sent:' + ST.sent);
     }
     if (i + SEND_PARALLEL < records.length) await sleep(100);
   }
 }
 
-// FAST2SMS MODE — DLT safe
 async function sendFast2SMSMode(records) {
   log('INFO', 'FAST2SMS MODE — ' + SMS_PER_SEC + '/sec');
 
@@ -340,7 +318,7 @@ async function sendFast2SMSMode(records) {
   });
 
   var total = batches.length;
-  log('INFO', 'Batches: ' + total + ' | Est: ~' + Math.ceil(total * WAIT_MS / 60000) + ' min');
+  log('INFO', 'Batches: ' + total);
 
   for (var i = 0; i < total; i++) {
     var batch = batches[i];
@@ -359,7 +337,7 @@ async function sendFast2SMSMode(records) {
       if (res.ok && json.return === true) sIds = batch.records.map(function(r) { return r.id; });
       else throw new Error('HTTP ' + res.status);
     } catch (err) {
-      log('WARN', 'F2S fail batch ' + (i+1), { err: err.message });
+      log('WARN', 'F2S fail ' + (i+1), { err: err.message });
       fIds = batch.records.map(function(r) { return r.id; });
     }
 
@@ -376,7 +354,6 @@ async function sendFast2SMSMode(records) {
   }
 }
 
-// REPORT
 function report() {
   var sec = Math.round((Date.now() - ST.t0) / 1000);
   var pct = ST.total > 0 ? Math.round(ST.sent / ST.total * 100) : 0;
@@ -389,35 +366,26 @@ function report() {
   log('INFO', '  Failed  : ' + ST.failed);
   log('INFO', '  Skipped : ' + ST.skipped);
   log('INFO', '  Time    : ' + sec + 's');
+  log('INFO', '  Rate    : ' + pct + '%');
   log('INFO', '='.repeat(50));
 
   fs.writeFileSync(
     path.join(LOG_DIR, 'report-' + TODAY + '.json'),
-    JSON.stringify({ date:TODAY, mode:MODE, queued:ST.queued, total:ST.total, sent:ST.sent, failed:ST.failed, skipped:ST.skipped, time:sec+'s', calls:ST.calls }, null, 2)
+    JSON.stringify({ date:TODAY, mode:MODE, queued:ST.queued, total:ST.total, sent:ST.sent, failed:ST.failed, skipped:ST.skipped, time:sec+'s' }, null, 2)
   );
 }
 
-// ════════════════════════════════════════════════════════
-// MAIN — Smart flow
-// ════════════════════════════════════════════════════════
 async function main() {
   try {
     checkEnv();
-
-    // SMART CHECK — 3 queries only, ~2 seconds
     var check = await smartCheck();
-
-    // If nothing to do → EXIT immediately
     if (!check.shouldContinue) {
-      log('INFO', 'Total time: ' + Math.round((Date.now() - ST.t0) / 1000) + 's');
-      return; // EXIT — no customer scan needed!
+      log('INFO', 'Done in ' + Math.round((Date.now() - ST.t0) / 1000) + 's');
+      return;
     }
-
-    // Only scan customers if there's actual work
     await stepQueue(check.todayFests);
     await stepSend();
     report();
-
     if (ST.total > 0 && ST.failed / ST.total > 0.5) {
       log('ERROR', '>50% failed');
       process.exit(1);
